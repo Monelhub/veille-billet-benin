@@ -160,6 +160,15 @@ def env(name, default=""):
     return (os.getenv(name) or default).strip()
 
 
+def smtp_default(user):
+    dom = user.split("@")[-1].lower()
+    return {"gmail.com": "smtp.gmail.com", "googlemail.com": "smtp.gmail.com",
+            "outlook.com": "smtp-mail.outlook.com", "outlook.fr": "smtp-mail.outlook.com",
+            "hotmail.com": "smtp-mail.outlook.com", "hotmail.fr": "smtp-mail.outlook.com",
+            "live.fr": "smtp-mail.outlook.com", "yahoo.com": "smtp.mail.yahoo.com",
+            "yahoo.fr": "smtp.mail.yahoo.com", "orange.fr": "smtp.orange.fr"}.get(dom, "smtp.gmail.com")
+
+
 def channels_report():
     def mark(ok):
         return "OK" if ok else "ABSENT"
@@ -167,8 +176,8 @@ def channels_report():
             f"Telegram: {mark(env('TELEGRAM_TOKEN') and env('TELEGRAM_CHAT_ID'))} "
             f"(TELEGRAM_TOKEN {mark(env('TELEGRAM_TOKEN'))}, TELEGRAM_CHAT_ID {mark(env('TELEGRAM_CHAT_ID'))}) | "
             f"ntfy: {mark(env('NTFY_TOPIC'))} | "
-            f"Email: {mark(env('SMTP_HOST') and env('EMAIL_TO'))} "
-            f"(SMTP_HOST={env('SMTP_HOST') or 'ABSENT'}, SMTP_PORT={env('SMTP_PORT') or 'ABSENT'}, "
+            f"Email: {mark(env('SMTP_USER') and env('EMAIL_TO'))} "
+            f"(SMTP_HOST {'défini' if env('SMTP_HOST') else 'auto'}, SMTP_PORT {'défini' if env('SMTP_PORT') else 'auto'}, "
             f"SMTP_USER {mark(env('SMTP_USER'))}, SMTP_PASS {mark(env('SMTP_PASS'))} "
             f"[{len(env('SMTP_PASS').replace(' ', ''))} caractères], EMAIL_TO {mark(env('EMAIL_TO'))})")
 
@@ -218,9 +227,9 @@ def notify(title, body, level="info", dry_run=False):
         except Exception as e:
             log(f"ntfy KO : {e}")
 
-    host, to = env("SMTP_HOST"), env("EMAIL_TO")
+    user, to = env("SMTP_USER"), env("EMAIL_TO")
+    host = env("SMTP_HOST") or (smtp_default(user) if user else "")
     if host and to:
-        user = env("SMTP_USER")
         pwd = env("SMTP_PASS").replace(" ", "")   # mot de passe d'application Google : espaces ignorés
         host = host.replace("https://", "").replace("http://", "").strip("/")
         msg = EmailMessage()
