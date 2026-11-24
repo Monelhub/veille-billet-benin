@@ -1,0 +1,58 @@
+name: Veille vols Bénin
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"      # toutes les 5 min (GitHub peut retarder de quelques minutes)
+  workflow_dispatch:            # bouton "Run workflow" pour lancer à la main
+    inputs:
+      test:
+        description: "Envoyer une notification de test"
+        type: boolean
+        default: false
+
+concurrency:
+  group: veille-benin
+  cancel-in-progress: false
+
+jobs:
+  veille:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      STATE_FILE: etat_veille.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restaurer l'état précédent
+        uses: actions/cache/restore@v4
+        with:
+          path: etat_veille.json
+          key: etat-${{ github.run_id }}
+          restore-keys: etat-
+
+      - name: Test des notifications
+        if: ${{ github.event.inputs.test == 'true' }}
+        run: python veille_benin.py --test
+
+      - name: Surveiller (vérification toutes les ~45 s pendant 4 min 30)
+        if: ${{ github.event.inputs.test != 'true' }}
+        run: python veille_benin.py --loop --interval 45 --duration 270
+
+      - name: Sauvegarder l'état
+        if: always() && hashFiles('etat_veille.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: etat_veille.json
+          key: etat-${{ github.run_id }}
