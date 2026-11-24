@@ -155,6 +155,24 @@ def contains_any(text, words):
 # Notifications
 # ---------------------------------------------------------------------------
 
+def env(name, default=""):
+    """Variable d'environnement nettoyée (GitHub met une chaîne vide si le secret n'existe pas)."""
+    return (os.getenv(name) or default).strip()
+
+
+def channels_report():
+    def mark(ok):
+        return "OK" if ok else "ABSENT"
+    return ("Canaux détectés → "
+            f"Telegram: {mark(env('TELEGRAM_TOKEN') and env('TELEGRAM_CHAT_ID'))} "
+            f"(TELEGRAM_TOKEN {mark(env('TELEGRAM_TOKEN'))}, TELEGRAM_CHAT_ID {mark(env('TELEGRAM_CHAT_ID'))}) | "
+            f"ntfy: {mark(env('NTFY_TOPIC'))} | "
+            f"Email: {mark(env('SMTP_HOST') and env('EMAIL_TO'))} "
+            f"(SMTP_HOST={env('SMTP_HOST') or 'ABSENT'}, SMTP_PORT={env('SMTP_PORT') or 'ABSENT'}, "
+            f"SMTP_USER {mark(env('SMTP_USER'))}, SMTP_PASS {mark(env('SMTP_PASS'))} "
+            f"[{len(env('SMTP_PASS').replace(' ', ''))} caractères], EMAIL_TO {mark(env('EMAIL_TO'))})")
+
+
 def _post(url, data=None, headers=None, timeout=20):
     req = urllib.request.Request(url, data=data, headers=headers or {}, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -167,10 +185,10 @@ def notify(title, body, level="info", dry_run=False):
     full = f"{icon} {title}\n\n{body}\n\n— Veille Bénin, {now_paris():%d/%m %H:%M}"
     if dry_run:
         print("----- NOTIFICATION (dry-run) -----\n" + full + "\n---------------------------------")
-        return
+        return 1
     sent = 0
 
-    tok, chats = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    tok, chats = env("TELEGRAM_TOKEN"), env("TELEGRAM_CHAT_ID")
     if tok and chats:
         for chat in [c.strip() for c in chats.split(",") if c.strip()]:
             try:
@@ -181,11 +199,12 @@ def notify(title, body, level="info", dry_run=False):
                 _post(f"https://api.telegram.org/bot{tok}/sendMessage", data)
                 sent += 1
             except Exception as e:
-                log(f"Telegram KO ({chat}) : {e}")
+                detail = e.read().decode(errors="replace")[:200] if hasattr(e, "read") else ""
+                log(f"Telegram KO ({chat}) : {e} {detail}")
 
-    topic = os.getenv("NTFY_TOPIC")
+    topic = env("NTFY_TOPIC").replace("https://ntfy.sh/", "").strip("/")
     if topic:
-        server = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+        server = env("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
         prio = {"info": "default", "important": "high", "urgent": "max"}[level]
         try:
             # paramètres en query-string : évite les soucis d'accents dans les en-têtes HTTP
@@ -199,35 +218,56 @@ def notify(title, body, level="info", dry_run=False):
         except Exception as e:
             log(f"ntfy KO : {e}")
 
-    host, to = os.getenv("SMTP_HOST"), os.getenv("EMAIL_TO")
+    host, to = env("SMTP_HOST"), env("EMAIL_TO")
     if host and to:
+        user = env("SMTP_USER")
+        pwd = env("SMTP_PASS").replace(" ", "")   # mot de passe d'application Google : espaces ignorés
+        host = host.replace("https://", "").replace("http://", "").strip("/")
+        msg = EmailMessage()
+        msg["Subject"] = f"{'[URGENT] ' if level == 'urgent' else ''}{title}"
+        msg["From"] = env("EMAIL_FROM") or user
+        msg["To"] = to.replace(" ", "")
+        if level == "urgent":
+            msg["X-Priority"] = "1"
+            msg["Importance"] = "high"
+        msg.set_content(full)
         try:
-            msg = EmailMessage()
-            msg["Subject"] = f"{'[URGENT] ' if level == 'urgent' else ''}{title}"
-            msg["From"] = os.getenv("EMAIL_FROM") or os.getenv("SMTP_USER")
-            msg["To"] = to
-            if level == "urgent":
-                msg["X-Priority"] = "1"
-                msg["Importance"] = "high"
-            msg.set_content(full)
-            port = int(os.getenv("SMTP_PORT", "465"))
-            ctx = ssl.create_default_context()
-            if port == 465:
-                s = smtplib.SMTP_SSL(host, port, context=ctx, timeout=30)
-            else:
-                s = smtplib.SMTP(host, port, timeout=30)
-                s.starttls(context=ctx)
-            s.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASS"))
-            s.send_message(msg)
-            s.quit()
+            first_port = int(env("SMTP_PORT") or "465")
+        except ValueError:
+            first_port = 465
+        # on essaie le port indiqué, puis l'autre (465 SSL / 587 STARTTLS)
+        ports = [first_port] + [p for p in (465, 587) if p != first_port]
+        ok = False
+        for port in ports:
+            try:
+                ctx = ssl.create_default_context()
+                if port == 465:
+                    s = smtplib.SMTP_SSL(host, port, context=ctx, timeout=30)
+                else:
+                    s = smtplib.SMTP(host, port, timeout=30)
+                    s.ehlo()
+                    s.starttls(context=ctx)
+                    s.ehlo()
+                s.login(user, pwd)
+                s.send_message(msg)
+                s.quit()
+                ok = True
+                log(f"Email envoyé via {host}:{port}")
+                break
+            except smtplib.SMTPAuthenticationError as e:
+                log(f"Email KO ({host}:{port}) : identifiant ou mot de passe d'application refusé — {e}")
+                break
+            except Exception as e:
+                log(f"Email KO ({host}:{port}) : {e!r}")
+        if ok:
             sent += 1
-        except Exception as e:
-            log(f"Email KO : {e}")
 
     if sent == 0:
+        log(channels_report())
         log("AUCUN canal de notification n'a fonctionné ! Message :\n" + full)
     else:
         log(f"Notification envoyée ({level}) sur {sent} canal(aux) : {title}")
+    return sent
 
 
 # ---------------------------------------------------------------------------
@@ -423,9 +463,12 @@ def main():
     state_path = os.getenv("STATE_FILE", "etat_veille.json")
 
     if a.test:
-        notify("Test Veille Bénin", "Si tu lis ceci, les alertes fonctionnent ✅\n"
+        n = notify("Test Veille Bénin", "Si tu lis ceci, les alertes fonctionnent ✅\n"
                f"Site surveillé : {OFFICIAL_URL}", "urgent", a.dry_run)
-        return
+        if not a.dry_run and not n:
+            log("ÉCHEC : aucune notification envoyée (voir les lignes KO / ABSENT ci-dessus).")
+            return 1
+        return 0
 
     state = load_state(state_path)
     start = time.time()
